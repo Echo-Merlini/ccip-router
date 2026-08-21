@@ -363,7 +363,7 @@ export class SQLiteDB implements DB {
       key:        record.key,
       value:      record.value,
       timestamp:  record.timestamp,
-      signature:  record.signature,
+      signature:  canonicalizeSignature(record.signature),  // low-s: malleated forms collapse to one
       sourcePeer: record.sourcePeer,
     })
   }
@@ -604,6 +604,27 @@ export class SQLiteDB implements DB {
   close(): void {
     this.db.close()
   }
+}
+
+// secp256k1 order and its half — for EIP-2 low-s normalization.
+const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
+const SECP256K1_HALF_N = SECP256K1_N >> 1n
+
+// Canonicalize an ECDSA signature to low-s (EIP-2) before it is used as an attestation dedup key.
+// ECDSA is malleable: (r, s, v) and (r, n−s, v') recover the same signer over the same message, so
+// without this a single attestation could be stored twice (storage-growth / corroboration inflation).
+// A non-65-byte signature is returned unchanged — the caller stores what it received.
+function canonicalizeSignature(sig: string): string {
+  const h = sig.startsWith('0x') ? sig.slice(2) : sig
+  if (h.length !== 130) return sig
+  const r = h.slice(0, 64)
+  let s = BigInt('0x' + h.slice(64, 128))
+  let v = parseInt(h.slice(128, 130), 16)
+  if (s > SECP256K1_HALF_N) {
+    s = SECP256K1_N - s
+    v = v === 27 ? 28 : v === 28 ? 27 : v ^ 1
+  }
+  return '0x' + r + s.toString(16).padStart(64, '0') + v.toString(16).padStart(2, '0')
 }
 
 function toMeshRecord(row: RecordRow): MeshRecord {

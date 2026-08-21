@@ -219,6 +219,25 @@ describe('ERC-8309 attestation retention (signature-keyed)', () => {
     assert.equal(atts.length, 0)
     db.close()
   })
+
+  // ECDSA malleability: (r, s, v) and (r, n-s, v') are the SAME signed message. Without low-s
+  // canonicalization of the dedup key, one attestation stores as two (storage-growth / corroboration
+  // inflation). They must collapse to one.
+  test('malleated signatures (low-s vs high-s) collapse to one attestation', async () => {
+    const db = makeDB()
+    const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
+    const r = 'ab'.repeat(32)
+    const sLow = 0x1111111111111111111111111111111111111111111111111111111111111111n
+    const hex = (x: bigint) => x.toString(16).padStart(64, '0')
+    const sigLowS  = '0x' + r + hex(sLow)     + '1b'  // v=27, already low-s
+    const sigHighS = '0x' + r + hex(N - sLow) + '1c'  // v=28, high-s malleation of the SAME signature
+    const base = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: sigHighS })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, signature: sigLowS })
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 1)  // one signed message, not two
+    db.close()
+  })
 })
 
 describe('getRecordsByInputHash', () => {
