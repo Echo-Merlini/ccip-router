@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { SCHEMA, MIGRATIONS } from './schema.js'
-import type { DB, MeshRecord, PeerState, Contribution, NameRecord, Message, MessageType, JoinRequest } from './types.js'
+import type { DB, MeshRecord, RecordState, PeerState, Contribution, NameRecord, Message, MessageType, JoinRequest } from './types.js'
 
 type EnsRow = {
   name:        string
@@ -50,6 +50,7 @@ export class SQLiteDB implements DB {
     getOne: Database.Statement
     getOneNs: Database.Statement
     getAllByHash: Database.Statement
+    getAllByHashNs: Database.Statement
     upsertPeer: Database.Statement
     getPeers: Database.Statement
     count: Database.Statement
@@ -130,6 +131,13 @@ export class SQLiteDB implements DB {
       // all records for an inputHash across every namespace (used by /verify)
       getAllByHash: this.db.prepare(`
         SELECT * FROM records WHERE input_hash = ? ORDER BY namespace ASC
+      `),
+
+      // ERC-8309: every stored observation for one (input_hash, namespace).
+      // >1 row here means genuine multi-vantage divergence — surfaced, not dropped.
+      getAllByHashNs: this.db.prepare(`
+        SELECT * FROM records WHERE input_hash = ? AND namespace = ?
+        ORDER BY timestamp ASC, value ASC
       `),
 
       upsertPeer: this.db.prepare(`
@@ -365,6 +373,23 @@ export class SQLiteDB implements DB {
   async getRecordsByInputHash(inputHash: string): Promise<MeshRecord[]> {
     const rows = this.stmts.getAllByHash.all(inputHash) as RecordRow[]
     return rows.map(toMeshRecord)
+  }
+
+  // ERC-8309 divergence-aware read surface. Returns the record-store state for a
+  // key as {single | divergent | absent} — never a silently-chosen winner, and
+  // never divergence represented as agreement. This is the named extension point:
+  // a deployment MAY attach a declared resolution policy by overriding
+  // resolveDivergence; the default surfaces divergence and resolves nothing.
+  resolveDivergence: (s: RecordState) => RecordState = (s) => s
+
+  async getRecordState(inputHash: string, namespace: string): Promise<RecordState> {
+    const rows = this.stmts.getAllByHashNs.all(inputHash, namespace) as RecordRow[]
+    if (rows.length === 0) return { state: 'absent' }
+    const records = rows.map(toMeshRecord)
+    const state: RecordState = records.length === 1
+      ? { state: 'single', record: records[0] }
+      : { state: 'divergent', records }
+    return this.resolveDivergence(state)
   }
 
   async upsertPeer(peer: PeerState): Promise<void> {

@@ -76,6 +76,70 @@ describe('deduplication (INSERT OR IGNORE)', () => {
   })
 })
 
+describe('ERC-8309 divergence preservation', () => {
+  // R-DUP: two OBSERVATION-IDENTICAL records (same (inputHash, namespace, value))
+  // from different signers collapse to one — dedup is a correct no-op here.
+  // Identity excludes signature/timestamp/peer. (Quorum profiles that count
+  // per-value corroboration need the discarded multiplicity — a declared
+  // extension, not mandated by this base; see the §Deduplication amendment note.)
+  test('R-DUP: observation-identical records (same value) from different signers collapse to one', async () => {
+    const db = makeDB()
+    const rec = makeRecord({ value: '0xSAME', sourcePeer: 'nodeA' })
+    await db.insertRecord(rec)
+    await db.insertRecord({ ...rec, signature: '0x' + 'dd'.repeat(65), sourcePeer: 'nodeB' })
+    const recs = await db.getRecordsByInputHash(rec.inputHash)
+    assert.equal(recs.length, 1)
+    assert.equal(recs[0].value, '0xSAME')
+    db.close()
+  })
+
+  // R-DIV: two VALID observations with DIFFERENT value for the same key are BOTH
+  // retained — the second is not silently dropped. This is the amendment; it was
+  // RED before the PK widen (first-valid-wins) and is GREEN after.
+  test('R-DIV: genuine divergence retains both observations, not one', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xOUTPUT_A', sourcePeer: 'gatewayA' })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, value: '0xOUTPUT_B', signature: '0x' + 'bb'.repeat(65), sourcePeer: 'gatewayB' })
+    const recs = await db.getRecordsByInputHash(base.inputHash)
+    assert.equal(recs.length, 2)
+    assert.deepEqual(new Set(recs.map(r => r.value)), new Set(['0xOUTPUT_A', '0xOUTPUT_B']))
+    db.close()
+  })
+
+  // Divergence is surfaced as a first-class state, never folded into agreement
+  // and never a silently-chosen winner.
+  test('getRecordState reports absent | single | divergent', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xA' })
+    const absent = await db.getRecordState(base.inputHash, base.namespace)
+    assert.equal(absent.state, 'absent')
+
+    await db.insertRecord(base)
+    const single = await db.getRecordState(base.inputHash, base.namespace)
+    assert.equal(single.state, 'single')
+
+    await db.insertRecord({ ...base, value: '0xB', signature: '0x' + 'bb'.repeat(65), sourcePeer: 'nodeB' })
+    const divergent = await db.getRecordState(base.inputHash, base.namespace)
+    assert.equal(divergent.state, 'divergent')
+    if (divergent.state === 'divergent') assert.equal(divergent.records.length, 2)
+    db.close()
+  })
+
+  // Observation-identical collapse keeps the FIRST attestation (INSERT OR IGNORE),
+  // not the last — locks the tie-break so it can't silently flip to keep-last.
+  test('dedup keeps the first observation (first-valid-wins), not the last', async () => {
+    const db = makeDB()
+    const first = makeRecord({ value: '0xSAME', sourcePeer: 'nodeA' })
+    await db.insertRecord(first)
+    await db.insertRecord({ ...first, signature: '0x' + 'dd'.repeat(65), sourcePeer: 'nodeB' })
+    const recs = await db.getRecordsByInputHash(first.inputHash)
+    assert.equal(recs.length, 1)
+    assert.equal(recs[0].sourcePeer, 'nodeA')  // REPLACE would surface nodeB
+    db.close()
+  })
+})
+
 describe('getRecordsByInputHash', () => {
   test('returns all records for a given inputHash across namespaces', async () => {
     const db = makeDB()
@@ -102,6 +166,16 @@ describe('getRecordsSince + cursor pagination', () => {
     await db.insertRecord(makeRecord({ inputHash: '0x' + 'bb'.repeat(32), timestamp: 2000 }))
     const recs = await db.getRecordsSince('test-ns', 1500, 100)
     assert.equal(recs.length, 1)
+    assert.equal(recs[0].timestamp, 2000)
+    db.close()
+  })
+
+  test('excludes a record at exactly `since` (strict >, not >=)', async () => {
+    const db = makeDB()
+    await db.insertRecord(makeRecord({ inputHash: '0x' + 'aa'.repeat(32), timestamp: 1000 }))
+    await db.insertRecord(makeRecord({ inputHash: '0x' + 'bb'.repeat(32), timestamp: 2000 }))
+    const recs = await db.getRecordsSince('test-ns', 1000, 100)  // since == first record's ts
+    assert.equal(recs.length, 1)                                  // ts=1000 excluded by strict >
     assert.equal(recs[0].timestamp, 2000)
     db.close()
   })
