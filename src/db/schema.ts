@@ -156,19 +156,22 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
     version: 8,
     sql: `
       CREATE TABLE IF NOT EXISTS attestations (
-        input_hash  TEXT    NOT NULL,
-        namespace   TEXT    NOT NULL,
-        key         TEXT    NOT NULL,
-        value       TEXT    NOT NULL,
-        timestamp   INTEGER NOT NULL,
-        signature   TEXT    NOT NULL,
-        source_peer TEXT,
-        PRIMARY KEY (input_hash, namespace, value, signature)
+        input_hash     TEXT    NOT NULL,
+        namespace      TEXT    NOT NULL,
+        key            TEXT    NOT NULL,
+        value          TEXT    NOT NULL,
+        timestamp      INTEGER NOT NULL,
+        signature      TEXT    NOT NULL,
+        source_peer    TEXT,
+        attestation_id TEXT    NOT NULL,
+        signed         INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (input_hash, namespace, value, attestation_id)
       );
       CREATE INDEX IF NOT EXISTS idx_attestations_key
         ON attestations (input_hash, namespace, value);
-      INSERT OR IGNORE INTO attestations
-        SELECT input_hash, namespace, key, value, timestamp, signature, source_peer FROM records;
+      -- No SQL backfill: attestation_id / signed must be computed per row (canonical signature vs a
+      -- content digest for unsigned records). The constructor backfills from records via insertAttestation
+      -- so pre-existing "0x" rows are classified, not copied in as collisions.
     `,
   },
 ]

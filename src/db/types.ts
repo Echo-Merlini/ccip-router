@@ -75,6 +75,7 @@ export interface DB {
   getRecordsByInputHash(inputHash: string): Promise<MeshRecord[]>
   getRecordState(inputHash: string, namespace: string): Promise<RecordState>
   getAttestations(inputHash: string, namespace: string, value: string): Promise<MeshRecord[]>
+  getSignedAttestations(inputHash: string, namespace: string, value: string): Promise<MeshRecord[]>
   getRecentRecords(namespace: string, limit: number): Promise<MeshRecord[]>
   getContributions(namespace: string): Promise<Contribution[]>
   upsertPeer(peer: PeerState): Promise<void>

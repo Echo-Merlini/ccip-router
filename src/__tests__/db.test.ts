@@ -238,6 +238,45 @@ describe('ERC-8309 attestation retention (signature-keyed)', () => {
     assert.equal(atts.length, 1)  // one signed message, not two
     db.close()
   })
+
+  // Unsigned/dry-run records carry signature "0x". Keyed on the raw signature they would ALL collide
+  // on "0x" and silently dedup away their own multiplicity. A content-digest fallback identity keeps
+  // distinct unsigned records distinct.
+  test('distinct unsigned records for one observation do NOT collapse on "0x"', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x', sourcePeer: 'nodeA', timestamp: 100 })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, timestamp: 200 })  // distinct observation content, same "0x"
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 2)
+    db.close()
+  })
+
+  // Transport metadata (source_peer) is not part of identity — otherwise it could mint attestations.
+  test('source_peer does not redefine unsigned identity (same observation, two peers = one)', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x', sourcePeer: 'nodeA', timestamp: 100 })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB' })  // same content, different transport
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 1)
+    db.close()
+  })
+
+  // Only signed attestations are eligible for V2 / quorum counting. "0x" stays observable, never counted.
+  test('getSignedAttestations excludes unsigned "0x" records', async () => {
+    const db = makeDB()
+    const ih = '0x' + 'cd'.repeat(32)
+    const signed = makeRecord({ inputHash: ih, value: '0xV', signature: '0x' + 'aa'.repeat(65), sourcePeer: 'nodeA' })
+    await db.insertRecord(signed)
+    await db.insertRecord({ ...signed, signature: '0x', sourcePeer: 'nodeB' })  // unsigned/dry-run
+    const all = await db.getAttestations(ih, signed.namespace, '0xV')
+    const eligible = await db.getSignedAttestations(ih, signed.namespace, '0xV')
+    assert.equal(all.length, 2)       // both observable
+    assert.equal(eligible.length, 1)  // only the signed one counts
+    assert.notEqual(eligible[0].signature, '0x')
+    db.close()
+  })
 })
 
 describe('getRecordsByInputHash', () => {

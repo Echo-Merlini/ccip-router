@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { SCHEMA, MIGRATIONS } from './schema.js'
 import type { DB, MeshRecord, RecordState, PeerState, Contribution, NameRecord, Message, MessageType, JoinRequest } from './types.js'
 
@@ -53,6 +54,7 @@ export class SQLiteDB implements DB {
     getAllByHashNs: Database.Statement
     insertAttestation: Database.Statement
     getAttestationsFor: Database.Statement
+    getSignedAttestationsFor: Database.Statement
     upsertPeer: Database.Statement
     getPeers: Database.Statement
     count: Database.Statement
@@ -146,14 +148,21 @@ export class SQLiteDB implements DB {
       // NOT NULL); an exact replay (same signature) is an idempotent no-op.
       insertAttestation: this.db.prepare(`
         INSERT OR IGNORE INTO attestations
-          (input_hash, namespace, key, value, timestamp, signature, source_peer)
+          (input_hash, namespace, key, value, timestamp, signature, source_peer, attestation_id, signed)
         VALUES
-          (@inputHash, @namespace, @key, @value, @timestamp, @signature, @sourcePeer)
+          (@inputHash, @namespace, @key, @value, @timestamp, @signature, @sourcePeer, @attestationId, @signed)
       `),
 
       getAttestationsFor: this.db.prepare(`
         SELECT * FROM attestations WHERE input_hash = ? AND namespace = ? AND value = ?
-        ORDER BY timestamp ASC, signature ASC
+        ORDER BY timestamp ASC, attestation_id ASC
+      `),
+
+      // V2 / §7.1 eligibility: only signed attestations mint signer weight. "0x" is observable but
+      // never counted. A companion still cryptographically verifies before counting.
+      getSignedAttestationsFor: this.db.prepare(`
+        SELECT * FROM attestations WHERE input_hash = ? AND namespace = ? AND value = ? AND signed = 1
+        ORDER BY timestamp ASC, attestation_id ASC
       `),
 
       upsertPeer: this.db.prepare(`
@@ -315,6 +324,31 @@ export class SQLiteDB implements DB {
         UPDATE snapshots SET status = ? WHERE period_id = ?
       `),
     }
+
+    this.backfillAttestations()
+  }
+
+  // One-time reclassifying backfill: populate attestations from records with the correct per-row
+  // identity (canonical signature when signed, content digest when not) and signed flag. Idempotent;
+  // runs only when attestations is empty but records is not (right after the v8 migration), so pre-v8
+  // rows — including unsigned "0x" ones — are classified, never copied in as "0x" collisions.
+  private backfillAttestations(): void {
+    const att = this.db.prepare(`SELECT COUNT(*) AS n FROM attestations`).get() as { n: number }
+    if (att.n > 0) return
+    const recs = this.db.prepare(`SELECT * FROM records`).all() as RecordRow[]
+    if (recs.length === 0) return
+    const tx = this.db.transaction((rows: RecordRow[]) => {
+      for (const row of rows) {
+        const r = toMeshRecord(row)
+        const id = attestationIdentity(r)
+        this.stmts.insertAttestation.run({
+          inputHash: r.inputHash, namespace: r.namespace, key: r.key, value: r.value,
+          timestamp: r.timestamp, signature: r.signature, sourcePeer: r.sourcePeer,
+          attestationId: id.id, signed: id.signed,
+        })
+      }
+    })
+    tx(recs)
   }
 
   // Run pending migrations in order, tracking applied versions in schema_version.
@@ -357,14 +391,17 @@ export class SQLiteDB implements DB {
 
     // Retain the signed message for per-value corroboration (quorum-class policies count vantages).
     // records keeps one observation per value; attestations keeps every distinct signature.
+    const att = attestationIdentity(record)  // low-s-canonical signature if signed; content digest if not
     this.stmts.insertAttestation.run({
-      inputHash:  record.inputHash,
-      namespace:  record.namespace,
-      key:        record.key,
-      value:      record.value,
-      timestamp:  record.timestamp,
-      signature:  canonicalizeSignature(record.signature),  // low-s: malleated forms collapse to one
-      sourcePeer: record.sourcePeer,
+      inputHash:     record.inputHash,
+      namespace:     record.namespace,
+      key:           record.key,
+      value:         record.value,
+      timestamp:     record.timestamp,
+      signature:     record.signature,   // as received; attestation_id carries the canonical dedup key
+      sourcePeer:    record.sourcePeer,
+      attestationId: att.id,
+      signed:        att.signed,
     })
   }
 
@@ -373,6 +410,14 @@ export class SQLiteDB implements DB {
   // profile weighs them. Empty when the value was never attested.
   async getAttestations(inputHash: string, namespace: string, value: string): Promise<MeshRecord[]> {
     const rows = this.stmts.getAttestationsFor.all(inputHash, namespace, value) as RecordRow[]
+    return rows.map(toMeshRecord)
+  }
+
+  // The signed (structurally eligible) attestations for a value — the set V2 / §7.1 counting operates
+  // on. Unsigned "0x"/dry-run records are excluded here (observable via getAttestations, never counted).
+  // Structural only: a companion still cryptographically verifies each before minting signer weight.
+  async getSignedAttestations(inputHash: string, namespace: string, value: string): Promise<MeshRecord[]> {
+    const rows = this.stmts.getSignedAttestationsFor.all(inputHash, namespace, value) as RecordRow[]
     return rows.map(toMeshRecord)
   }
 
@@ -625,6 +670,25 @@ function canonicalizeSignature(sig: string): string {
     v = v === 27 ? 28 : v === 28 ? 27 : v ^ 1
   }
   return '0x' + r + s.toString(16).padStart(64, '0') + v.toString(16).padStart(2, '0')
+}
+
+// A record is a signed attestation iff it carries a well-formed, non-empty 65-byte signature.
+// Unsigned/dry-run records carry signature "0x" (see mesh/sync.ts) — structurally NOT signed. This is
+// structural eligibility only; a companion profile still cryptographically verifies validity over the
+// observation and recovers the signer before counting signer weight (V2 / §7.1).
+function isSignedAttestation(sig: string): boolean {
+  return sig !== '0x' && /^0x[0-9a-f]{130}$/i.test(sig)
+}
+
+// The dedup identity of an attestation. Signed → its low-s-canonical signature. Unsigned → a content
+// digest over a PINNED preimage of the OBSERVATION (input_hash, namespace, key, value, timestamp) —
+// deliberately excluding source_peer and the signature, so transport metadata cannot redefine identity
+// and distinct unsigned records do not all collide on "0x" (they would silently dedup away their own
+// multiplicity). Never mints signer weight either way; signed-ness is carried separately.
+function attestationIdentity(r: MeshRecord): { id: string; signed: number } {
+  if (isSignedAttestation(r.signature)) return { id: canonicalizeSignature(r.signature), signed: 1 }
+  const preimage = `ccip.attestation.unsigned.v1|${r.inputHash}|${r.namespace}|${r.key}|${r.value}|${r.timestamp}`
+  return { id: 'unsigned:' + createHash('sha256').update(preimage, 'utf8').digest('hex'), signed: 0 }
 }
 
 function toMeshRecord(row: RecordRow): MeshRecord {
