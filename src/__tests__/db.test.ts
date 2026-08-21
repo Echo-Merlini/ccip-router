@@ -140,6 +140,41 @@ describe('ERC-8309 divergence preservation', () => {
   })
 })
 
+// Equivocation (one signer, two signatures) is a distinct event from honest
+// multi-vantage divergence (two signers). The detector must fire on the first
+// and stay silent on the second — the base separates the two.
+describe('double-sign detector (same-signer equivocation)', () => {
+  function captureWarn(): { warns: string[]; restore: () => void } {
+    const warns: string[] = []
+    const orig = console.warn
+    console.warn = ((m?: unknown) => { warns.push(String(m)) }) as typeof console.warn
+    return { warns, restore: () => { console.warn = orig } }
+  }
+
+  test('warns when one signer submits a different signature for the same key', async () => {
+    const db = makeDB()
+    const c = captureWarn()
+    try {
+      const r = makeRecord({ sourcePeer: 'nodeA', signature: '0x' + 'aa'.repeat(65) })
+      await db.insertRecord(r)
+      await db.insertRecord({ ...r, value: '0xOTHER', signature: '0x' + 'bb'.repeat(65) })
+    } finally { c.restore() }
+    assert.ok(c.warns.some(w => w.includes('double-sign')), 'must warn on same-signer equivocation')
+    db.close()
+  })
+
+  test('does NOT warn when different signers attest the same key (honest divergence)', async () => {
+    const db = makeDB()
+    const c = captureWarn()
+    try {
+      await db.insertRecord(makeRecord({ sourcePeer: 'nodeA', value: '0xA', signature: '0x' + 'aa'.repeat(65) }))
+      await db.insertRecord(makeRecord({ sourcePeer: 'nodeB', value: '0xB', signature: '0x' + 'bb'.repeat(65) }))
+    } finally { c.restore() }
+    assert.equal(c.warns.filter(w => w.includes('double-sign')).length, 0, 'different signers is not equivocation')
+    db.close()
+  })
+})
+
 describe('getRecordsByInputHash', () => {
   test('returns all records for a given inputHash across namespaces', async () => {
     const db = makeDB()
