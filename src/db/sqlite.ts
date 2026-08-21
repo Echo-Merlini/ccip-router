@@ -685,9 +685,27 @@ function isSignedAttestation(sig: string): boolean {
 // deliberately excluding source_peer and the signature, so transport metadata cannot redefine identity
 // and distinct unsigned records do not all collide on "0x" (they would silently dedup away their own
 // multiplicity). Never mints signer weight either way; signed-ness is carried separately.
+// Canonical serialization the recompute-kit family already gates on: sorted-key UTF-8 JSON + exactly
+// one trailing LF. Injective across field boundaries (JSON quotes/escapes each value), unlike delimiter
+// concatenation — where ("a|b","c") and ("a","b|c") would hash identically.
+function encodeJsonUtf8Lf(obj: Record<string, unknown>): string {
+  const sorted: Record<string, unknown> = {}
+  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
+  return JSON.stringify(sorted) + '\n'
+}
+
 function attestationIdentity(r: MeshRecord): { id: string; signed: number } {
   if (isSignedAttestation(r.signature)) return { id: canonicalizeSignature(r.signature), signed: 1 }
-  const preimage = `ccip.attestation.unsigned.v1|${r.inputHash}|${r.namespace}|${r.key}|${r.value}|${r.timestamp}`
+  // Named canonical object, not delimiter concat, so the preimage is injective across field boundaries.
+  // source_peer and signature stay OUT of identity (transport metadata must not redefine identity).
+  const preimage = encodeJsonUtf8Lf({
+    domain: 'ccip.attestation.unsigned.v1',
+    input_hash: r.inputHash,
+    namespace: r.namespace,
+    key: r.key,
+    value: r.value,
+    timestamp: r.timestamp,
+  })
   return { id: 'unsigned:' + createHash('sha256').update(preimage, 'utf8').digest('hex'), signed: 0 }
 }
 
