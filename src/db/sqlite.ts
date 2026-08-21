@@ -51,6 +51,8 @@ export class SQLiteDB implements DB {
     getOneNs: Database.Statement
     getAllByHash: Database.Statement
     getAllByHashNs: Database.Statement
+    insertAttestation: Database.Statement
+    getAttestationsFor: Database.Statement
     upsertPeer: Database.Statement
     getPeers: Database.Statement
     count: Database.Statement
@@ -138,6 +140,20 @@ export class SQLiteDB implements DB {
       getAllByHashNs: this.db.prepare(`
         SELECT * FROM records WHERE input_hash = ? AND namespace = ?
         ORDER BY timestamp ASC, value ASC
+      `),
+
+      // ERC-8309 attestation retention: every distinct signed message is kept (signature is
+      // NOT NULL); an exact replay (same signature) is an idempotent no-op.
+      insertAttestation: this.db.prepare(`
+        INSERT OR IGNORE INTO attestations
+          (input_hash, namespace, key, value, timestamp, signature, source_peer)
+        VALUES
+          (@inputHash, @namespace, @key, @value, @timestamp, @signature, @sourcePeer)
+      `),
+
+      getAttestationsFor: this.db.prepare(`
+        SELECT * FROM attestations WHERE input_hash = ? AND namespace = ? AND value = ?
+        ORDER BY timestamp ASC, signature ASC
       `),
 
       upsertPeer: this.db.prepare(`
@@ -338,6 +354,26 @@ export class SQLiteDB implements DB {
       signature:  record.signature,
       sourcePeer: record.sourcePeer,
     })
+
+    // Retain the signed message for per-value corroboration (quorum-class policies count vantages).
+    // records keeps one observation per value; attestations keeps every distinct signature.
+    this.stmts.insertAttestation.run({
+      inputHash:  record.inputHash,
+      namespace:  record.namespace,
+      key:        record.key,
+      value:      record.value,
+      timestamp:  record.timestamp,
+      signature:  record.signature,
+      sourcePeer: record.sourcePeer,
+    })
+  }
+
+  // ERC-8309 attestation retention: the distinct signed messages attesting a specific value, in
+  // ingest order. Corroboration count = attestations of one value; the base retains them, a quorum
+  // profile weighs them. Empty when the value was never attested.
+  async getAttestations(inputHash: string, namespace: string, value: string): Promise<MeshRecord[]> {
+    const rows = this.stmts.getAttestationsFor.all(inputHash, namespace, value) as RecordRow[]
+    return rows.map(toMeshRecord)
   }
 
   async getRecordsSince(

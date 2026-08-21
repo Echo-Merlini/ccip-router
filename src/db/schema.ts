@@ -145,4 +145,30 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS idx_records_ns_ts ON records (namespace, timestamp);
     `,
   },
+  {
+    // ERC-8309 attestation retention (companion base extension). `records` keeps ONE observation
+    // per (input_hash, namespace, value) — first-valid-wins — which discards per-value corroboration
+    // (how many independent vantages attested a value), exactly what quorum-class policies count.
+    // Retention is a SEPARATE, signature-keyed concern: `signature` is NOT NULL on every valid
+    // attestation (unlike source_peer, whose NULLs break uniqueness), so keying on it retains every
+    // distinct signed message while an exact replay (same signature) is an idempotent no-op.
+    // Observation identity stays (input_hash, namespace, value); this table is corroboration.
+    version: 8,
+    sql: `
+      CREATE TABLE IF NOT EXISTS attestations (
+        input_hash  TEXT    NOT NULL,
+        namespace   TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        value       TEXT    NOT NULL,
+        timestamp   INTEGER NOT NULL,
+        signature   TEXT    NOT NULL,
+        source_peer TEXT,
+        PRIMARY KEY (input_hash, namespace, value, signature)
+      );
+      CREATE INDEX IF NOT EXISTS idx_attestations_key
+        ON attestations (input_hash, namespace, value);
+      INSERT OR IGNORE INTO attestations
+        SELECT input_hash, namespace, key, value, timestamp, signature, source_peer FROM records;
+    `,
+  },
 ]

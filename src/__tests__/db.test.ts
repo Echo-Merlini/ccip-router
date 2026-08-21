@@ -175,6 +175,52 @@ describe('double-sign detector (same-signer equivocation)', () => {
   })
 })
 
+// The base extension: records keeps ONE observation per value (first-valid-wins), which discards
+// per-value corroboration. A signature-keyed attestation table retains every distinct signed message
+// without touching observation identity — quorum-class policies count these vantages.
+describe('ERC-8309 attestation retention (signature-keyed)', () => {
+  test('exact replay (same signature) is an idempotent no-op', async () => {
+    const db = makeDB()
+    const r = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(r)
+    await db.insertRecord(r)   // byte-identical replay
+    const atts = await db.getAttestations(r.inputHash, r.namespace, '0xV')
+    assert.equal(atts.length, 1)
+    db.close()
+  })
+
+  test('retains BOTH attestations of one value from different signers (corroboration records drops)', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB', signature: '0x' + 'bb'.repeat(65) })
+    const recs = await db.getRecordsByInputHash(base.inputHash)
+    assert.equal(recs.length, 1)                       // records collapses to one observation
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 2)                       // attestations keeps both signed messages
+    assert.deepEqual(new Set(atts.map(a => a.sourcePeer)), new Set(['nodeA', 'nodeB']))
+    db.close()
+  })
+
+  test('observation identity unchanged: same value, two signers is still single, not divergent', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB', signature: '0x' + 'bb'.repeat(65) })
+    const st = await db.getRecordState(base.inputHash, base.namespace)
+    assert.equal(st.state, 'single')                   // divergence is by distinct value, not attestation count
+    db.close()
+  })
+
+  test('getAttestations is empty for an unattested value', async () => {
+    const db = makeDB()
+    await db.insertRecord(makeRecord({ value: '0xV' }))
+    const atts = await db.getAttestations(makeRecord().inputHash, makeRecord().namespace, '0xOTHER')
+    assert.equal(atts.length, 0)
+    db.close()
+  })
+})
+
 describe('getRecordsByInputHash', () => {
   test('returns all records for a given inputHash across namespaces', async () => {
     const db = makeDB()
