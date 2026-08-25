@@ -175,6 +175,110 @@ describe('double-sign detector (same-signer equivocation)', () => {
   })
 })
 
+// The base extension: records keeps ONE observation per value (first-valid-wins), which discards
+// per-value corroboration. A signature-keyed attestation table retains every distinct signed message
+// without touching observation identity — quorum-class policies count these vantages.
+describe('ERC-8309 attestation retention (signature-keyed)', () => {
+  test('exact replay (same signature) is an idempotent no-op', async () => {
+    const db = makeDB()
+    const r = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(r)
+    await db.insertRecord(r)   // byte-identical replay
+    const atts = await db.getAttestations(r.inputHash, r.namespace, '0xV')
+    assert.equal(atts.length, 1)
+    db.close()
+  })
+
+  test('retains BOTH attestations of one value from different signers (corroboration records drops)', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB', signature: '0x' + 'bb'.repeat(65) })
+    const recs = await db.getRecordsByInputHash(base.inputHash)
+    assert.equal(recs.length, 1)                       // records collapses to one observation
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 2)                       // attestations keeps both signed messages
+    assert.deepEqual(new Set(atts.map(a => a.sourcePeer)), new Set(['nodeA', 'nodeB']))
+    db.close()
+  })
+
+  test('observation identity unchanged: same value, two signers is still single, not divergent', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x' + 'aa'.repeat(65) })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB', signature: '0x' + 'bb'.repeat(65) })
+    const st = await db.getRecordState(base.inputHash, base.namespace)
+    assert.equal(st.state, 'single')                   // divergence is by distinct value, not attestation count
+    db.close()
+  })
+
+  test('getAttestations is empty for an unattested value', async () => {
+    const db = makeDB()
+    await db.insertRecord(makeRecord({ value: '0xV' }))
+    const atts = await db.getAttestations(makeRecord().inputHash, makeRecord().namespace, '0xOTHER')
+    assert.equal(atts.length, 0)
+    db.close()
+  })
+
+  // ECDSA malleability: (r, s, v) and (r, n-s, v') are the SAME signed message. Without low-s
+  // canonicalization of the dedup key, one attestation stores as two (storage-growth / corroboration
+  // inflation). They must collapse to one.
+  test('malleated signatures (low-s vs high-s) collapse to one attestation', async () => {
+    const db = makeDB()
+    const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n
+    const r = 'ab'.repeat(32)
+    const sLow = 0x1111111111111111111111111111111111111111111111111111111111111111n
+    const hex = (x: bigint) => x.toString(16).padStart(64, '0')
+    const sigLowS  = '0x' + r + hex(sLow)     + '1b'  // v=27, already low-s
+    const sigHighS = '0x' + r + hex(N - sLow) + '1c'  // v=28, high-s malleation of the SAME signature
+    const base = makeRecord({ value: '0xV', sourcePeer: 'nodeA', signature: sigHighS })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, signature: sigLowS })
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 1)  // one signed message, not two
+    db.close()
+  })
+
+  // Unsigned/dry-run records carry signature "0x". Keyed on the raw signature they would ALL collide
+  // on "0x" and silently dedup away their own multiplicity. A content-digest fallback identity keeps
+  // distinct unsigned records distinct.
+  test('distinct unsigned records for one observation do NOT collapse on "0x"', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x', sourcePeer: 'nodeA', timestamp: 100 })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, timestamp: 200 })  // distinct observation content, same "0x"
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 2)
+    db.close()
+  })
+
+  // Transport metadata (source_peer) is not part of identity — otherwise it could mint attestations.
+  test('source_peer does not redefine unsigned identity (same observation, two peers = one)', async () => {
+    const db = makeDB()
+    const base = makeRecord({ value: '0xV', signature: '0x', sourcePeer: 'nodeA', timestamp: 100 })
+    await db.insertRecord(base)
+    await db.insertRecord({ ...base, sourcePeer: 'nodeB' })  // same content, different transport
+    const atts = await db.getAttestations(base.inputHash, base.namespace, '0xV')
+    assert.equal(atts.length, 1)
+    db.close()
+  })
+
+  // Only signed attestations are eligible for V2 / quorum counting. "0x" stays observable, never counted.
+  test('getSignedAttestations excludes unsigned "0x" records', async () => {
+    const db = makeDB()
+    const ih = '0x' + 'cd'.repeat(32)
+    const signed = makeRecord({ inputHash: ih, value: '0xV', signature: '0x' + 'aa'.repeat(65), sourcePeer: 'nodeA' })
+    await db.insertRecord(signed)
+    await db.insertRecord({ ...signed, signature: '0x', sourcePeer: 'nodeB' })  // unsigned/dry-run
+    const all = await db.getAttestations(ih, signed.namespace, '0xV')
+    const eligible = await db.getSignedAttestations(ih, signed.namespace, '0xV')
+    assert.equal(all.length, 2)       // both observable
+    assert.equal(eligible.length, 1)  // only the signed one counts
+    assert.notEqual(eligible[0].signature, '0x')
+    db.close()
+  })
+})
+
 describe('getRecordsByInputHash', () => {
   test('returns all records for a given inputHash across namespaces', async () => {
     const db = makeDB()
