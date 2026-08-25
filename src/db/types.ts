@@ -12,6 +12,13 @@ export type MeshRecord = {
   sourcePeer: string | null  // null = produced locally
 }
 
+// ERC-8309 record-store state for one (inputHash, namespace). Divergence is a
+// first-class outcome — never a silent drop, never folded into agreement.
+export type RecordState =
+  | { state: 'absent' }
+  | { state: 'single'; record: MeshRecord }
+  | { state: 'divergent'; records: MeshRecord[] }  // committed attestation set, enumerated
+
 export type PeerState = {
   url: string
   lastSyncAt: number
@@ -66,6 +73,7 @@ export interface DB {
   getRecordsSince(namespace: string, since: number, limit: number, cursor?: string): Promise<MeshRecord[]>
   getRecord(inputHash: string, namespace?: string): Promise<MeshRecord | null>
   getRecordsByInputHash(inputHash: string): Promise<MeshRecord[]>
+  getRecordState(inputHash: string, namespace: string): Promise<RecordState>
   getRecentRecords(namespace: string, limit: number): Promise<MeshRecord[]>
   getContributions(namespace: string): Promise<Contribution[]>
   upsertPeer(peer: PeerState): Promise<void>

@@ -111,4 +111,38 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
       );
     `,
   },
+  {
+    // ERC-8309 divergence preservation: same (input_hash, namespace) with a
+    // DIFFERING value is a first-class divergence, not a duplicate. Observation
+    // identity is (input_hash, namespace, value); signature, timestamp and
+    // source_peer are attestation metadata OUTSIDE identity. Widening the PK to
+    // include value keeps INSERT OR IGNORE an observation-identical no-op (same
+    // value collapses even from different signers) while letting two honest,
+    // differing observations coexist instead of the second being silently
+    // dropped. Divergence must be preserved by the data model — it is upstream
+    // of every consumer's view.
+    // NOTE (quorum deferral): collapsing same-value/different-peer to one row
+    // discards attestation multiplicity. Value-divergence is preserved; per-value
+    // corroboration counts (needed by a quorum profile) are NOT retained by this
+    // base and are a declared extension — see the §Deduplication amendment note.
+    version: 7,
+    sql: `
+      ALTER TABLE records RENAME TO records_legacy;
+      CREATE TABLE records (
+        input_hash  TEXT    NOT NULL,
+        namespace   TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        value       TEXT    NOT NULL,
+        timestamp   INTEGER NOT NULL,
+        signature   TEXT    NOT NULL,
+        source_peer TEXT,
+        PRIMARY KEY (input_hash, namespace, value)
+      );
+      INSERT OR IGNORE INTO records
+        SELECT input_hash, namespace, key, value, timestamp, signature, source_peer
+        FROM records_legacy;
+      DROP TABLE records_legacy;
+      CREATE INDEX IF NOT EXISTS idx_records_ns_ts ON records (namespace, timestamp);
+    `,
+  },
 ]
