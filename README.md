@@ -578,6 +578,33 @@ GET /records?namespace=<str>&since=<unix>&limit=<n>&cursor=<str>
   }
 ```
 
+### TSEI → Profile A observation gateway
+
+Submit the **exact public TSEI receipt bytes** as the request body. Do not wrap
+the receipt in another JSON object: its SHA-256 is computed over the body bytes
+exactly as received.
+
+```bash
+curl -X POST http://localhost:3002/tsei/profile-a/observations \
+  -H 'content-type: application/json' \
+  --data-binary @TSEI_v2_Public_Production_Grounding_Receipt.json
+```
+
+```text
+POST /tsei/profile-a/observations
+→ { attestation, observation: { state: "single" | "divergent", values: [...] } }
+→ { error: "SIGNING_UNAVAILABLE" }  (503 — GATEWAY_PRIVATE_KEY not configured)
+
+GET /tsei/profile-a/observations/:inputHash
+→ { input_hash, namespace, state: "single" | "divergent", values: [...] }
+→ { input_hash, namespace, state: "absent", values: [] }  (404)
+```
+
+The endpoint never silently selects a value when exact receipt bytes diverge:
+it returns every distinct digest and every valid signed attestation. The
+`ccip-gateway-signed-receipt` vantage class identifies the signing mechanism
+only; it does **not** claim organizational, stranger, or oracle independence.
+
 ### ERC-8281 (OCP) observation commitment (ERC-8263)
 ```
 GET /ocp/:inputHash

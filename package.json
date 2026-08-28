@@ -17,6 +17,7 @@
     "dist/crypto",
     "dist/db",
     "dist/gateway",
+    "dist/integrations",
     "dist/lib.js",
     "dist/lib.js.map",
     "dist/lib.d.ts",
