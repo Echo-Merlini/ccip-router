@@ -13,3 +13,13 @@ export type { SignedVni, VniDocument } from './mesh/vni.js'
 export { withEns, isEnsCalldata } from './ens/withEns.js'
 export type { EnsResolverFn, EnsRecord } from './ens/withEns.js'
 export { encodeDnsName, decodeDnsName } from './ens/dns.js'
+export {
+  inspectTseiPublicReceipt,
+  makeUnsignedTseiProfileAObservation,
+  signTseiProfileAObservation,
+  toTseiProfileAAttestation,
+  TSEI_PROFILE_A_INPUT_DOMAIN,
+  TSEI_PROFILE_A_NAMESPACE,
+  TSEI_PROFILE_A_VANTAGE_CLASS,
+} from './integrations/tseiProfileA.js'
+export type { TseiProfileAAttestation, TseiReceiptInspection } from './integrations/tseiProfileA.js'
