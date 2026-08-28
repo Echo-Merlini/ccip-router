@@ -23,3 +23,13 @@ export {
   TSEI_PROFILE_A_VANTAGE_CLASS,
 } from './integrations/tseiProfileA.js'
 export type { TseiProfileAAttestation, TseiReceiptInspection } from './integrations/tseiProfileA.js'
+export {
+  createTseiProfileARouter,
+  readTseiProfileAObservationState,
+  DEFAULT_TSEI_PROFILE_A_MAX_RECEIPT_BYTES,
+} from './integrations/tseiProfileARouter.js'
+export type {
+  TseiProfileAObservationState,
+  TseiProfileAObservationValue,
+  TseiProfileARouterOptions,
+} from './integrations/tseiProfileARouter.js'

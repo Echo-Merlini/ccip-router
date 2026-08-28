@@ -13,6 +13,7 @@ import { recordsRouter } from './mesh/records.js'
 import { verifyRouter } from './verify/verify.js'
 import { ocpRouter } from './verify/ocp.js'
 import { bindingRouter } from './verify/binding.js'
+import { createTseiProfileARouter } from './integrations/tseiProfileARouter.js'
 import { startSyncCron } from './mesh/cron.js'
 import { peersRouter } from './mesh/records.js'
 import { makeVni } from './mesh/vni.js'
@@ -129,6 +130,7 @@ app.route('/messages', messagesRouter)
 app.route('/verify', verifyRouter)
 app.route('/ocp', ocpRouter)
 app.route('/recompute', bindingRouter)
+app.route('/tsei/profile-a', createTseiProfileARouter({ db, gatewayKey: config.gatewayKey ?? undefined }))
 
 // GET /vni — signed node identity document (VNI)
 app.get('/vni', async (c) => {
