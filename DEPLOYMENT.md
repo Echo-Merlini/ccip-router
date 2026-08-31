@@ -45,6 +45,9 @@ Both modes use the same Docker image and the same `npm` package. The difference 
 | `CDN_API_KEY` | No | API key / JWT for the configured CDN provider. |
 | `NETWORK_KEY` | No | Ethereum address. Messages signed by this key are marked as official network announcements. |
 | `CHAIN_ID` | No | Chain ID for ENS contenthash and on-chain operations. Default: `1` (mainnet). |
+| `TSEI_PROFILE_A_INGEST_SECRET` | Required for TSEI writes | Dedicated Bearer secret (minimum 32 characters) for `POST /tsei/profile-a/observations`. Without it, TSEI ingestion is disabled fail-closed; public observation reads remain available. |
+| `TSEI_PROFILE_A_RATE_LIMIT_MAX` | No | Maximum authenticated TSEI writes per process/window. Default: `60`. |
+| `TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS` | No | TSEI write-limit window in seconds. Default: `60`. |
 
 ### Public node extras
 
@@ -63,6 +66,7 @@ Use `network_mode: host` and a dedicated port (e.g. `4100`) so your reverse prox
 **`ccip-router.env`** (create alongside your compose file, `chmod 600`):
 ```bash
 GATEWAY_PRIVATE_KEY=0x...
+TSEI_PROFILE_A_INGEST_SECRET=<at-least-32-random-characters>
 # Add other secrets here: CDN_API_KEY, ADMIN_SECRET, RPC_URL, etc.
 ```
 
@@ -127,6 +131,7 @@ After first boot, open `https://your-gateway.example.com/admin` and sign in with
 
 ```
 GATEWAY_PRIVATE_KEY = 0x<fresh key — never reuse>
+TSEI_PROFILE_A_INGEST_SECRET = <at-least-32-random-characters>
 DISABLE_ADMIN       = true
 SYNC_NAMESPACE      = agent-attestations
 NODE_URL            = https://<your-railway-url>.up.railway.app
@@ -189,7 +194,8 @@ Never commit private keys. Use `env_file` (self-hosted) or the platform's secret
 
 ## Mesh security notes
 
-- **Keep secrets out of compose files:** store `GATEWAY_PRIVATE_KEY`, `CDN_API_KEY`, and `ADMIN_SECRET` in a `chmod 600` env file loaded via `env_file:`, not inline in your compose YAML. Compose files are easy to accidentally expose — in management UI logs, shared configs, or version control.
+- **Keep secrets out of compose files:** store `GATEWAY_PRIVATE_KEY`, `CDN_API_KEY`, `ADMIN_SECRET`, and `TSEI_PROFILE_A_INGEST_SECRET` in a `chmod 600` env file loaded via `env_file:`, not inline in your compose YAML. Compose files are easy to accidentally expose — in management UI logs, shared configs, or version control.
+- **TSEI write boundary:** use a dedicated TSEI ingestion secret rather than `ADMIN_SECRET`. The built-in limiter is per process; configure a shared upstream limiter for multi-replica deployments.
 - **Signer pinning:** on first sync from a peer, the recovered signer address is stored. Subsequent records from a different signer are rejected — a compromised peer cannot inject records on behalf of another node.
 - **Rate limiting:** the `/messages` endpoint accepts at most 10 messages per peer signer per hour.
 - **Admin surface:** always set `DISABLE_ADMIN=true` on any publicly-accessible node unless you specifically need the dashboard reachable. The dashboard is SIWE-protected, but reducing attack surface is always better.

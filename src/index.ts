@@ -130,7 +130,13 @@ app.route('/messages', messagesRouter)
 app.route('/verify', verifyRouter)
 app.route('/ocp', ocpRouter)
 app.route('/recompute', bindingRouter)
-app.route('/tsei/profile-a', createTseiProfileARouter({ db, gatewayKey: config.gatewayKey ?? undefined }))
+app.route('/tsei/profile-a', createTseiProfileARouter({
+  db,
+  gatewayKey: config.gatewayKey ?? undefined,
+  ingestSecret: config.tseiProfileAIngestSecret ?? undefined,
+  rateLimitMax: config.tseiProfileARateLimitMax,
+  rateLimitWindowSeconds: config.tseiProfileARateLimitWindowSeconds,
+}))
 
 // GET /vni — signed node identity document (VNI)
 app.get('/vni', async (c) => {
