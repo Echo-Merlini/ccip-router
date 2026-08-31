@@ -195,7 +195,7 @@ Never commit private keys. Use `env_file` (self-hosted) or the platform's secret
 ## Mesh security notes
 
 - **Keep secrets out of compose files:** store `GATEWAY_PRIVATE_KEY`, `CDN_API_KEY`, `ADMIN_SECRET`, and `TSEI_PROFILE_A_INGEST_SECRET` in a `chmod 600` env file loaded via `env_file:`, not inline in your compose YAML. Compose files are easy to accidentally expose — in management UI logs, shared configs, or version control.
-- **TSEI write boundary:** use a dedicated TSEI ingestion secret rather than `ADMIN_SECRET`. The built-in limiter is per process; configure a shared upstream limiter for multi-replica deployments.
+- **TSEI write boundary:** use a dedicated TSEI ingestion secret rather than `ADMIN_SECRET`; startup rejects equal values after trimming. The built-in limiter is per process; configure a shared upstream limiter for multi-replica deployments.
 - **Signer pinning:** on first sync from a peer, the recovered signer address is stored. Subsequent records from a different signer are rejected — a compromised peer cannot inject records on behalf of another node.
 - **Rate limiting:** the `/messages` endpoint accepts at most 10 messages per peer signer per hour.
 - **Admin surface:** always set `DISABLE_ADMIN=true` on any publicly-accessible node unless you specifically need the dashboard reachable. The dashboard is SIWE-protected, but reducing attack surface is always better.

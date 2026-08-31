@@ -436,7 +436,7 @@ npm run dev
 | `DISABLE_ADMIN` | No | `false` | Set `true` to skip mounting `/admin` and `/static` entirely. Recommended for public PaaS nodes. |
 | `RESOLVER_ADDRESS` | No | — | Deployed `OffchainResolver` contract (informational — shown in spec audit). |
 | `TRUTH_ANCHOR_ADDRESS` | No | — | ERC-8263 `TruthAnchorV1` contract address. When set, fires `anchorWithAux()` after every `AttestationIndex.record()` — emits `AnchorProof` with the `commitmentHash` as `proofHash`. Mainnet: `0xe95d6a15966984c209a62a2c188828555eb5ec3d`. Best-effort; does not affect `AttestationIndex` anchoring on failure. |
-| `TSEI_PROFILE_A_INGEST_SECRET` | Required for TSEI writes | — | Dedicated Bearer secret for `POST /tsei/profile-a/observations`. Must be at least 32 characters. If absent, ingestion fails closed with `503`; public reads remain available. Do not reuse `ADMIN_SECRET`. |
+| `TSEI_PROFILE_A_INGEST_SECRET` | Required for TSEI writes | — | Dedicated Bearer secret for `POST /tsei/profile-a/observations`. Must be at least 32 characters. If absent, ingestion fails closed with `503`; public reads remain available. Startup rejects reuse of `ADMIN_SECRET`. |
 | `TSEI_PROFILE_A_RATE_LIMIT_MAX` | No | `60` | Maximum authenticated TSEI ingestion attempts per process and sliding window. |
 | `TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS` | No | `60` | TSEI ingestion sliding-window length in seconds. |
 

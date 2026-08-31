@@ -247,6 +247,9 @@ export function loadConfig(): Config {
   if (tseiProfileAIngestSecret && tseiProfileAIngestSecret.length < 32) {
     throw new Error('TSEI_PROFILE_A_INGEST_SECRET must be at least 32 characters')
   }
+  if (tseiProfileAIngestSecret && adminSecret && tseiProfileAIngestSecret === adminSecret) {
+    throw new Error('TSEI_PROFILE_A_INGEST_SECRET must not reuse ADMIN_SECRET')
+  }
   const tseiProfileARateLimitMax = parsePositiveSafeInteger(
     'TSEI_PROFILE_A_RATE_LIMIT_MAX',
     raw.TSEI_PROFILE_A_RATE_LIMIT_MAX,

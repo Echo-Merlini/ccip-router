@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
+import { loadConfig } from '../config.js'
 import { recoverRecordSigner } from '../crypto/sign.js'
 import { SQLiteDB } from '../db/sqlite.js'
 import { TSEI_PROFILE_A_NAMESPACE } from '../integrations/tseiProfileA.js'
@@ -49,6 +50,36 @@ async function json(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe('TSEI Profile A gateway', () => {
+  test('rejects ADMIN_SECRET reuse while accepting a distinct ingest secret', () => {
+    const previousAdminSecret = process.env.ADMIN_SECRET
+    const previousIngestSecret = process.env.TSEI_PROFILE_A_INGEST_SECRET
+    const previousPort = process.env.PORT
+    const sharedSecret = 'shared-admin-and-tsei-secret-000001'
+    const distinctSecret = 'dedicated-tsei-ingest-secret-000001'
+
+    try {
+      process.env.PORT = '3000'
+      process.env.ADMIN_SECRET = ` ${sharedSecret} `
+      process.env.TSEI_PROFILE_A_INGEST_SECRET = sharedSecret
+      assert.throws(
+        () => loadConfig(),
+        /TSEI_PROFILE_A_INGEST_SECRET must not reuse ADMIN_SECRET/,
+      )
+
+      process.env.TSEI_PROFILE_A_INGEST_SECRET = distinctSecret
+      const config = loadConfig()
+      assert.equal(config.adminSecret, sharedSecret)
+      assert.equal(config.tseiProfileAIngestSecret, distinctSecret)
+    } finally {
+      if (previousAdminSecret === undefined) delete process.env.ADMIN_SECRET
+      else process.env.ADMIN_SECRET = previousAdminSecret
+      if (previousIngestSecret === undefined) delete process.env.TSEI_PROFILE_A_INGEST_SECRET
+      else process.env.TSEI_PROFILE_A_INGEST_SECRET = previousIngestSecret
+      if (previousPort === undefined) delete process.env.PORT
+      else process.env.PORT = previousPort
+    }
+  })
+
   test('accepts exact receipt bytes, signs, stores, and returns a single state', async () => {
     const db = new SQLiteDB(':memory:')
     const router = createTseiProfileARouter({
