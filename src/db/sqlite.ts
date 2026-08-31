@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { SCHEMA, MIGRATIONS } from './schema.js'
+import { encodeJsonUtf8LfV0 } from '../lib/encodeJsonUtf8LfV0.js'
 import type { DB, MeshRecord, RecordState, PeerState, Contribution, NameRecord, Message, MessageType, JoinRequest } from './types.js'
 
 type EnsRow = {
@@ -685,13 +686,15 @@ function isSignedAttestation(sig: string): boolean {
 // deliberately excluding source_peer and the signature, so transport metadata cannot redefine identity
 // and distinct unsigned records do not all collide on "0x" (they would silently dedup away their own
 // multiplicity). Never mints signer weight either way; signed-ness is carried separately.
-// Canonical serialization the recompute-kit family already gates on: sorted-key UTF-8 JSON + exactly
-// one trailing LF. Injective across field boundaries (JSON quotes/escapes each value), unlike delimiter
-// concatenation — where ("a|b","c") and ("a","b|c") would hash identically.
+// Canonical serialization the recompute-kit family gates on: encode-json-utf8-lf.v0 (sorted-key UTF-8
+// JSON + exactly one trailing LF). Injective across field boundaries (JSON quotes/escapes each value),
+// unlike delimiter concatenation — where ("a|b","c") and ("a","b|c") would hash identically. Delegates to
+// the conformant .v0 encoder (qualified against the 48 pinned vectors) so the domain is ENFORCED: a value
+// v0 rejects (negative zero, non-finite, unsafe integer, lone surrogate) fails closed here instead of being
+// silently mangled — closing a latent identity collision (Infinity/null, 2^53+1/2^53). Byte-identical to
+// the previous naive encoder on every conforming input, so existing unsigned identities are unchanged.
 function encodeJsonUtf8Lf(obj: Record<string, unknown>): string {
-  const sorted: Record<string, unknown> = {}
-  for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
-  return JSON.stringify(sorted) + '\n'
+  return encodeJsonUtf8LfV0(obj)
 }
 
 function attestationIdentity(r: MeshRecord): { id: string; signed: number } {
