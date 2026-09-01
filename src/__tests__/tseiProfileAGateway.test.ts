@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
+import { loadConfig } from '../config.js'
 import { recoverRecordSigner } from '../crypto/sign.js'
 import { SQLiteDB } from '../db/sqlite.js'
 import { TSEI_PROFILE_A_NAMESPACE } from '../integrations/tseiProfileA.js'
@@ -12,6 +13,8 @@ const ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
 const TIMESTAMP = 1_787_584_157
 const INPUT_HASH = '0xb17a5a2503494b793cc9ac5e7eaa6ff9dd5833c89af4e622005b4ede2d4c32c5'
 const RECEIPT_SHA = '0x09349e8257da2b94227f7af7f8e4dcdcca9e715dc460e1f419e53a14a22e5a07'
+const INGEST_SECRET = 'test-only-tsei-ingest-secret-0001'
+const AUTHORIZATION = `Bearer ${INGEST_SECRET}`
 
 const fixtureUrl = new URL(
   '../../conformance/tsei-profile-a-v0/fixtures/tsei-ia-real-v2-20260824-02.production-grounding.json',
@@ -28,6 +31,14 @@ function requestBody(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer
 }
 
+function authenticatedPost(bytes: Uint8Array | string): RequestInit {
+  return {
+    method: 'POST',
+    headers: { Authorization: AUTHORIZATION },
+    body: typeof bytes === 'string' ? bytes : requestBody(bytes),
+  }
+}
+
 function replaceUtf8(bytes: Uint8Array, from: string, to: string): Uint8Array {
   const text = new TextDecoder().decode(bytes)
   assert.ok(text.includes(from), `fixture must contain ${from}`)
@@ -39,14 +50,46 @@ async function json(response: Response): Promise<Record<string, unknown>> {
 }
 
 describe('TSEI Profile A gateway', () => {
+  test('rejects ADMIN_SECRET reuse while accepting a distinct ingest secret', () => {
+    const previousAdminSecret = process.env.ADMIN_SECRET
+    const previousIngestSecret = process.env.TSEI_PROFILE_A_INGEST_SECRET
+    const previousPort = process.env.PORT
+    const sharedSecret = 'shared-admin-and-tsei-secret-000001'
+    const distinctSecret = 'dedicated-tsei-ingest-secret-000001'
+
+    try {
+      process.env.PORT = '3000'
+      process.env.ADMIN_SECRET = ` ${sharedSecret} `
+      process.env.TSEI_PROFILE_A_INGEST_SECRET = sharedSecret
+      assert.throws(
+        () => loadConfig(),
+        /TSEI_PROFILE_A_INGEST_SECRET must not reuse ADMIN_SECRET/,
+      )
+
+      process.env.TSEI_PROFILE_A_INGEST_SECRET = distinctSecret
+      const config = loadConfig()
+      assert.equal(config.adminSecret, sharedSecret)
+      assert.equal(config.tseiProfileAIngestSecret, distinctSecret)
+    } finally {
+      if (previousAdminSecret === undefined) delete process.env.ADMIN_SECRET
+      else process.env.ADMIN_SECRET = previousAdminSecret
+      if (previousIngestSecret === undefined) delete process.env.TSEI_PROFILE_A_INGEST_SECRET
+      else process.env.TSEI_PROFILE_A_INGEST_SECRET = previousIngestSecret
+      if (previousPort === undefined) delete process.env.PORT
+      else process.env.PORT = previousPort
+    }
+  })
+
   test('accepts exact receipt bytes, signs, stores, and returns a single state', async () => {
     const db = new SQLiteDB(':memory:')
-    const router = createTseiProfileARouter({ db, gatewayKey: KEY, now: () => TIMESTAMP })
+    const router = createTseiProfileARouter({
+      db,
+      gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
+      now: () => TIMESTAMP,
+    })
     try {
-      const post = await router.request('/observations', {
-        method: 'POST',
-        body: requestBody(await fixture()),
-      })
+      const post = await router.request('/observations', authenticatedPost(await fixture()))
       assert.equal(post.status, 201)
       const created = await json(post)
       const attestation = created.attestation as Record<string, unknown>
@@ -78,12 +121,13 @@ describe('TSEI Profile A gateway', () => {
 
   test('refuses writes when the gateway signing key is unavailable', async () => {
     const db = new SQLiteDB(':memory:')
-    const router = createTseiProfileARouter({ db, now: () => TIMESTAMP })
+    const router = createTseiProfileARouter({
+      db,
+      ingestSecret: INGEST_SECRET,
+      now: () => TIMESTAMP,
+    })
     try {
-      const response = await router.request('/observations', {
-        method: 'POST',
-        body: requestBody(await fixture()),
-      })
+      const response = await router.request('/observations', authenticatedPost(await fixture()))
       assert.equal(response.status, 503)
       assert.equal((await json(response)).error, 'SIGNING_UNAVAILABLE')
       assert.deepEqual(await db.getRecordState(INPUT_HASH, TSEI_PROFILE_A_NAMESPACE), { state: 'absent' })
@@ -95,11 +139,16 @@ describe('TSEI Profile A gateway', () => {
   test('same exact receipt twice stays single and retains both attestations', async () => {
     const db = new SQLiteDB(':memory:')
     let timestamp = TIMESTAMP
-    const router = createTseiProfileARouter({ db, gatewayKey: KEY, now: () => timestamp++ })
+    const router = createTseiProfileARouter({
+      db,
+      gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
+      now: () => timestamp++,
+    })
     try {
       const bytes = await fixture()
-      assert.equal((await router.request('/observations', { method: 'POST', body: requestBody(bytes) })).status, 201)
-      assert.equal((await router.request('/observations', { method: 'POST', body: requestBody(bytes) })).status, 201)
+      assert.equal((await router.request('/observations', authenticatedPost(bytes))).status, 201)
+      assert.equal((await router.request('/observations', authenticatedPost(bytes))).status, 201)
 
       const response = await router.request(`/observations/${INPUT_HASH}`)
       const state = await json(response)
@@ -115,7 +164,12 @@ describe('TSEI Profile A gateway', () => {
   test('changed exact bytes for one instance surface divergence without choosing a winner', async () => {
     const db = new SQLiteDB(':memory:')
     let timestamp = TIMESTAMP
-    const router = createTseiProfileARouter({ db, gatewayKey: KEY, now: () => timestamp++ })
+    const router = createTseiProfileARouter({
+      db,
+      gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
+      now: () => timestamp++,
+    })
     try {
       const original = await fixture()
       const changed = replaceUtf8(
@@ -123,8 +177,8 @@ describe('TSEI Profile A gateway', () => {
         'PRODUCTION_GROUNDING_MINTED_REAL_RUN_NOT_CLAIMED',
         'PRODUCTION_GROUNDING_REPORTED_REAL_RUN_NOT_CLAIMED',
       )
-      assert.equal((await router.request('/observations', { method: 'POST', body: requestBody(original) })).status, 201)
-      assert.equal((await router.request('/observations', { method: 'POST', body: requestBody(changed) })).status, 201)
+      assert.equal((await router.request('/observations', authenticatedPost(original))).status, 201)
+      assert.equal((await router.request('/observations', authenticatedPost(changed))).status, 201)
 
       // Even a deployment-level resolution hook must not hide divergence from
       // this evidence endpoint.
@@ -153,21 +207,16 @@ describe('TSEI Profile A gateway', () => {
     const router = createTseiProfileARouter({
       db,
       gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
       now: () => TIMESTAMP,
       maxReceiptBytes: 32,
     })
     try {
-      const malformed = await router.request('/observations', {
-        method: 'POST',
-        body: '{not-json}',
-      })
+      const malformed = await router.request('/observations', authenticatedPost('{not-json}'))
       assert.equal(malformed.status, 400)
       assert.equal((await json(malformed)).error, 'INVALID_TSEI_RECEIPT')
 
-      const oversized = await router.request('/observations', {
-        method: 'POST',
-        body: requestBody(new Uint8Array(33)),
-      })
+      const oversized = await router.request('/observations', authenticatedPost(new Uint8Array(33)))
       assert.equal(oversized.status, 413)
       assert.equal((await json(oversized)).error, 'RECEIPT_TOO_LARGE')
 
@@ -179,6 +228,105 @@ describe('TSEI Profile A gateway', () => {
       const absent = await router.request(`/observations/${absentHash}`)
       assert.equal(absent.status, 404)
       assert.equal((await json(absent)).state, 'absent')
+    } finally {
+      db.close()
+    }
+  })
+
+  test('fails closed when ingestion auth is unavailable or invalid while reads remain public', async () => {
+    const db = new SQLiteDB(':memory:')
+    const disabled = createTseiProfileARouter({ db, gatewayKey: KEY, now: () => TIMESTAMP })
+    const protectedRouter = createTseiProfileARouter({
+      db,
+      gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
+      now: () => TIMESTAMP,
+    })
+    try {
+      const unavailable = await disabled.request('/observations', {
+        method: 'POST',
+        body: requestBody(await fixture()),
+      })
+      assert.equal(unavailable.status, 503)
+      assert.equal((await json(unavailable)).error, 'INGEST_AUTH_UNAVAILABLE')
+
+      const missing = await protectedRouter.request('/observations', {
+        method: 'POST',
+        body: requestBody(await fixture()),
+      })
+      assert.equal(missing.status, 401)
+      assert.equal(missing.headers.get('www-authenticate'), 'Bearer')
+
+      const wrong = await protectedRouter.request('/observations', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer wrong-secret' },
+        body: requestBody(await fixture()),
+      })
+      assert.equal(wrong.status, 401)
+      assert.deepEqual(await db.getRecordState(INPUT_HASH, TSEI_PROFILE_A_NAMESPACE), { state: 'absent' })
+
+      const publicRead = await protectedRouter.request(`/observations/${INPUT_HASH}`)
+      assert.equal(publicRead.status, 404)
+      assert.equal((await json(publicRead)).state, 'absent')
+    } finally {
+      db.close()
+    }
+  })
+
+  test('rate limits authenticated signing attempts and publishes Retry-After', async () => {
+    const db = new SQLiteDB(':memory:')
+    let rateLimitTime = 1_000
+    const router = createTseiProfileARouter({
+      db,
+      gatewayKey: KEY,
+      ingestSecret: INGEST_SECRET,
+      now: () => TIMESTAMP,
+      rateLimitNow: () => rateLimitTime,
+      rateLimitMax: 2,
+      rateLimitWindowSeconds: 60,
+    })
+    try {
+      const bytes = await fixture()
+      const unauthorized = await router.request('/observations', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer not-the-ingest-secret' },
+        body: requestBody(bytes),
+      })
+      assert.equal(unauthorized.status, 401)
+
+      assert.equal((await router.request('/observations', authenticatedPost(bytes))).status, 201)
+      assert.equal((await router.request('/observations', authenticatedPost(bytes))).status, 201)
+
+      const limited = await router.request('/observations', authenticatedPost(bytes))
+      assert.equal(limited.status, 429)
+      assert.equal(limited.headers.get('retry-after'), '60')
+      assert.deepEqual(await json(limited), {
+        error: 'RATE_LIMIT_EXCEEDED',
+        limit: 2,
+        window_seconds: 60,
+      })
+
+      rateLimitTime += 60_000
+      assert.equal((await router.request('/observations', authenticatedPost(bytes))).status, 201)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('rejects invalid rate-limit configuration at construction', () => {
+    const db = new SQLiteDB(':memory:')
+    try {
+      assert.throws(
+        () => createTseiProfileARouter({ db, rateLimitMax: 0 }),
+        /rateLimitMax must be a positive safe integer/,
+      )
+      assert.throws(
+        () => createTseiProfileARouter({
+          db,
+          rateLimitWindowSeconds: Number.MAX_SAFE_INTEGER,
+        }),
+        /rateLimitWindowSeconds is too large/,
+      )
     } finally {
       db.close()
     }

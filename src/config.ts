@@ -37,6 +37,10 @@ export type Config = {
   resolverAddress:  `0x${string}` | null
   // ERC-8263 TruthAnchorV1 — optional second anchor target alongside AttestationIndex
   truthAnchorAddress: `0x${string}` | null
+  // TSEI Profile A ingestion is an operator-only hot-key signing surface.
+  tseiProfileAIngestSecret: string | null
+  tseiProfileARateLimitMax: number
+  tseiProfileARateLimitWindowSeconds: number
 }
 
 export type ConfigFile = {
@@ -112,6 +116,14 @@ function parsePort(val: string | undefined): number {
   return n
 }
 
+function parsePositiveSafeInteger(key: string, val: string | undefined, fallback: number): number {
+  const n = Number(val ?? fallback)
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw new Error(`${key} must be a positive safe integer, got "${val}"`)
+  }
+  return n
+}
+
 export function loadConfig(): Config {
   const file = loadConfigFile()
 
@@ -142,6 +154,10 @@ export function loadConfig(): Config {
     RESOLVER_ADDRESS:    process.env.RESOLVER_ADDRESS     ?? file.resolverAddress,
     TRUTH_ANCHOR_ADDRESS: process.env.TRUTH_ANCHOR_ADDRESS ?? file.truthAnchorAddress,
     ADMIN_ADDRESS:       process.env.ADMIN_ADDRESS        ?? undefined,
+    TSEI_PROFILE_A_INGEST_SECRET: process.env.TSEI_PROFILE_A_INGEST_SECRET,
+    TSEI_PROFILE_A_RATE_LIMIT_MAX: process.env.TSEI_PROFILE_A_RATE_LIMIT_MAX,
+    TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS:
+      process.env.TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS,
   }
 
   const gatewayKey = raw.GATEWAY_PRIVATE_KEY
@@ -227,6 +243,27 @@ export function loadConfig(): Config {
     console.log(`[config] anchor:    truthAnchorAddress=${truthAnchorAddress} (ERC-8263)`)
   }
 
+  const tseiProfileAIngestSecret = raw.TSEI_PROFILE_A_INGEST_SECRET?.trim() || null
+  if (tseiProfileAIngestSecret && tseiProfileAIngestSecret.length < 32) {
+    throw new Error('TSEI_PROFILE_A_INGEST_SECRET must be at least 32 characters')
+  }
+  if (tseiProfileAIngestSecret && adminSecret && tseiProfileAIngestSecret === adminSecret) {
+    throw new Error('TSEI_PROFILE_A_INGEST_SECRET must not reuse ADMIN_SECRET')
+  }
+  const tseiProfileARateLimitMax = parsePositiveSafeInteger(
+    'TSEI_PROFILE_A_RATE_LIMIT_MAX',
+    raw.TSEI_PROFILE_A_RATE_LIMIT_MAX,
+    60,
+  )
+  const tseiProfileARateLimitWindowSeconds = parsePositiveSafeInteger(
+    'TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS',
+    raw.TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS,
+    60,
+  )
+  if (!tseiProfileAIngestSecret) {
+    console.warn('[config] TSEI_PROFILE_A_INGEST_SECRET not set — TSEI Profile A ingestion disabled')
+  }
+
   if (disableAdmin) {
     console.log('[config] admin:     disabled (public node mode)')
   }
@@ -261,6 +298,9 @@ export function loadConfig(): Config {
     disableAdmin,
     resolverAddress,
     truthAnchorAddress,
+    tseiProfileAIngestSecret,
+    tseiProfileARateLimitMax,
+    tseiProfileARateLimitWindowSeconds,
   }
 }
 

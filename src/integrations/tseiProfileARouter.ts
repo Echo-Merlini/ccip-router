@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { DB, MeshRecord } from '../db/types.js'
 import {
   signTseiProfileAObservation,
@@ -8,6 +9,8 @@ import {
 import type { TseiProfileAAttestation } from './tseiProfileA.js'
 
 export const DEFAULT_TSEI_PROFILE_A_MAX_RECEIPT_BYTES = 1_048_576
+export const DEFAULT_TSEI_PROFILE_A_RATE_LIMIT_MAX = 60
+export const DEFAULT_TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS = 60
 
 export type TseiProfileAObservationValue = {
   value: string
@@ -32,12 +35,31 @@ export type TseiProfileAObservationState =
 export type TseiProfileARouterOptions = {
   db: DB
   gatewayKey?: `0x${string}`
+  ingestSecret?: string
   now?: () => number
+  rateLimitNow?: () => number
   maxReceiptBytes?: number
+  rateLimitMax?: number
+  rateLimitWindowSeconds?: number
 }
 
 function isBytes32(value: string): boolean {
   return /^0x[0-9a-f]{64}$/i.test(value)
+}
+
+function isAuthorizedBearer(authorization: string | undefined, secret: string): boolean {
+  const candidate = authorization?.startsWith('Bearer ')
+    ? authorization.slice('Bearer '.length)
+    : ''
+  const candidateDigest = createHash('sha256').update(candidate, 'utf8').digest()
+  const secretDigest = createHash('sha256').update(secret, 'utf8').digest()
+  return timingSafeEqual(candidateDigest, secretDigest) && candidate.length > 0
+}
+
+function requirePositiveSafeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer`)
+  }
 }
 
 async function convertAttestations(records: MeshRecord[]): Promise<{
@@ -117,19 +139,60 @@ export async function readTseiProfileAObservationState(
 export function createTseiProfileARouter(options: TseiProfileARouterOptions): Hono {
   const router = new Hono()
   const now = options.now ?? (() => Math.floor(Date.now() / 1000))
+  const rateLimitNow = options.rateLimitNow ?? Date.now
   const maxReceiptBytes = options.maxReceiptBytes ?? DEFAULT_TSEI_PROFILE_A_MAX_RECEIPT_BYTES
+  const rateLimitMax = options.rateLimitMax ?? DEFAULT_TSEI_PROFILE_A_RATE_LIMIT_MAX
+  const rateLimitWindowSeconds = options.rateLimitWindowSeconds
+    ?? DEFAULT_TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS
+  const attemptTimes: number[] = []
 
-  if (!Number.isSafeInteger(maxReceiptBytes) || maxReceiptBytes <= 0) {
-    throw new TypeError('maxReceiptBytes must be a positive safe integer')
+  requirePositiveSafeInteger(maxReceiptBytes, 'maxReceiptBytes')
+  requirePositiveSafeInteger(rateLimitMax, 'rateLimitMax')
+  requirePositiveSafeInteger(rateLimitWindowSeconds, 'rateLimitWindowSeconds')
+  if (!Number.isSafeInteger(rateLimitWindowSeconds * 1000)) {
+    throw new TypeError('rateLimitWindowSeconds is too large')
   }
 
   router.post('/observations', async (c) => {
+    if (!options.ingestSecret) {
+      return c.json({
+        error: 'INGEST_AUTH_UNAVAILABLE',
+        message: 'TSEI_PROFILE_A_INGEST_SECRET is required to accept observations',
+      }, 503)
+    }
+
+    if (!isAuthorizedBearer(c.req.header('authorization'), options.ingestSecret)) {
+      c.header('WWW-Authenticate', 'Bearer')
+      return c.json({ error: 'UNAUTHORIZED' }, 401)
+    }
+
     if (!options.gatewayKey) {
       return c.json({
         error: 'SIGNING_UNAVAILABLE',
         message: 'GATEWAY_PRIVATE_KEY is required to attest a TSEI observation',
       }, 503)
     }
+
+    const requestTime = rateLimitNow()
+    if (!Number.isSafeInteger(requestTime) || requestTime < 0) {
+      throw new TypeError('rateLimitNow must return a non-negative safe integer')
+    }
+    const windowMilliseconds = rateLimitWindowSeconds * 1000
+    while (attemptTimes.length > 0 && requestTime - attemptTimes[0]! >= windowMilliseconds) {
+      attemptTimes.shift()
+    }
+    if (attemptTimes.length >= rateLimitMax) {
+      const retryAfter = Math.max(1, Math.ceil(
+        (attemptTimes[0]! + windowMilliseconds - requestTime) / 1000,
+      ))
+      c.header('Retry-After', String(retryAfter))
+      return c.json({
+        error: 'RATE_LIMIT_EXCEEDED',
+        limit: rateLimitMax,
+        window_seconds: rateLimitWindowSeconds,
+      }, 429)
+    }
+    attemptTimes.push(requestTime)
 
     const contentLength = c.req.header('content-length')
     if (contentLength !== undefined) {

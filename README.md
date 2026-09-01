@@ -436,6 +436,9 @@ npm run dev
 | `DISABLE_ADMIN` | No | `false` | Set `true` to skip mounting `/admin` and `/static` entirely. Recommended for public PaaS nodes. |
 | `RESOLVER_ADDRESS` | No | — | Deployed `OffchainResolver` contract (informational — shown in spec audit). |
 | `TRUTH_ANCHOR_ADDRESS` | No | — | ERC-8263 `TruthAnchorV1` contract address. When set, fires `anchorWithAux()` after every `AttestationIndex.record()` — emits `AnchorProof` with the `commitmentHash` as `proofHash`. Mainnet: `0xe95d6a15966984c209a62a2c188828555eb5ec3d`. Best-effort; does not affect `AttestationIndex` anchoring on failure. |
+| `TSEI_PROFILE_A_INGEST_SECRET` | Required for TSEI writes | — | Dedicated Bearer secret for `POST /tsei/profile-a/observations`. Must be at least 32 characters. If absent, ingestion fails closed with `503`; public reads remain available. Startup rejects reuse of `ADMIN_SECRET`. |
+| `TSEI_PROFILE_A_RATE_LIMIT_MAX` | No | `60` | Maximum authenticated TSEI ingestion attempts per process and sliding window. |
+| `TSEI_PROFILE_A_RATE_LIMIT_WINDOW_SECONDS` | No | `60` | TSEI ingestion sliding-window length in seconds. |
 
 \* Can also come from `config.json` written by the setup wizard.
 \** Optional on persistent deployments; required on stateless ones — see [Self-hosted vs stateless](#self-hosted-vs-stateless-deployments) below.
@@ -586,6 +589,7 @@ exactly as received.
 
 ```bash
 curl -X POST http://localhost:3002/tsei/profile-a/observations \
+  -H "Authorization: Bearer $TSEI_PROFILE_A_INGEST_SECRET" \
   -H 'content-type: application/json' \
   --data-binary @TSEI_v2_Public_Production_Grounding_Receipt.json
 ```
@@ -593,6 +597,9 @@ curl -X POST http://localhost:3002/tsei/profile-a/observations \
 ```text
 POST /tsei/profile-a/observations
 → { attestation, observation: { state: "single" | "divergent", values: [...] } }
+→ { error: "UNAUTHORIZED" }  (401 — Bearer token missing or invalid)
+→ { error: "RATE_LIMIT_EXCEEDED", ... }  (429 — authenticated write limit reached)
+→ { error: "INGEST_AUTH_UNAVAILABLE" }  (503 — ingestion secret not configured)
 → { error: "SIGNING_UNAVAILABLE" }  (503 — GATEWAY_PRIVATE_KEY not configured)
 
 GET /tsei/profile-a/observations/:inputHash
@@ -604,6 +611,10 @@ The endpoint never silently selects a value when exact receipt bytes diverge:
 it returns every distinct digest and every valid signed attestation. The
 `ccip-gateway-signed-receipt` vantage class identifies the signing mechanism
 only; it does **not** claim organizational, stranger, or oracle independence.
+The write limiter is deliberately process-local: it protects one gateway hot
+key from accidental or opportunistic request floods, but it is not a durable
+distributed quota. Multi-replica deployments must add an upstream shared rate
+limit at the load balancer or API gateway.
 
 ### ERC-8281 (OCP) observation commitment (ERC-8263)
 ```
